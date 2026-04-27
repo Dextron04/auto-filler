@@ -19,7 +19,7 @@ trap cleanup SIGINT SIGTERM
 echo "--- Starting Auto-Filler ---"
 
 # Start Backend (Flask)
-echo "Starting Backend API on port 5000..."
+echo "Starting Backend API on port 5001..."
 cd "$DIR/backend"
 ../.venv/bin/python3 app.py &
 

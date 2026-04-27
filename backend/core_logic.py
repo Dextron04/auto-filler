@@ -1,18 +1,21 @@
 import re
+import datetime
 import openpyxl
 from docx import Document
 from pathlib import Path
 
 def format_value(placeholder_text, raw_value):
-    """Formats values as currency if the placeholder starts with [$]."""
+    """Formats currency for [$...] placeholders, dates for datetime values."""
+    if isinstance(raw_value, (datetime.datetime, datetime.date)):
+        return raw_value.strftime("%m/%d/%Y")
+
     is_dollar = bool(re.match(r"^\[\$", placeholder_text.strip()))
     if not is_dollar:
-        return raw_value
+        return str(raw_value)
     try:
-        # Handle cases where raw_value might already have symbols or commas
         num = float(str(raw_value).replace(",", "").replace("$", ""))
     except ValueError:
-        return raw_value
+        return str(raw_value)
     return f"${num:,.2f}"
 
 def read_excel_mappings(excel_path):
@@ -47,6 +50,86 @@ def read_excel_mappings(excel_path):
     # Sort by length descending to prevent partial replacements (e.g., [FIELD] vs [FIELD_1])
     mappings.sort(key=lambda x: len(x[0]), reverse=True)
     return mappings, skipped
+
+def read_excel_records(excel_path, sheet_name=None, placeholder_row=1, header_row=2, data_start_row=3):
+    """Reads a tabular export sheet where one row in the header block lists
+    bracketed placeholders. Returns (records, placeholder_columns, header_row_values).
+
+    records: list of dicts shaped {'mappings': [(placeholder, value), ...], 'row': raw_row_tuple}
+    placeholder_columns: list of (col_index, placeholder_text)
+    header_row_values: tuple of human-readable column headers from `header_row`
+    """
+    wb = openpyxl.load_workbook(excel_path, data_only=True)
+
+    ws = None
+    if sheet_name and sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+    else:
+        # Default to a sheet whose name starts with "Export" but isn't a pivot
+        for name in wb.sheetnames:
+            n = name.lower().strip()
+            if n.startswith("export") and "pivot" not in n:
+                ws = wb[name]
+                break
+        if ws is None:
+            ws = wb[wb.sheetnames[0]]
+
+    rows = list(ws.iter_rows(values_only=True))
+    if len(rows) < data_start_row:
+        raise ValueError(f"Sheet '{ws.title}' has too few rows for bulk fill.")
+
+    placeholder_row_vals = rows[placeholder_row - 1]
+    header_row_vals = rows[header_row - 1]
+
+    placeholder_columns = []
+    for idx, cell in enumerate(placeholder_row_vals):
+        if cell is None:
+            continue
+        text = str(cell).strip()
+        if not text or "[" not in text or "]" not in text:
+            continue
+        placeholder_columns.append((idx, text))
+
+    if not placeholder_columns:
+        raise ValueError(
+            f"No bracketed placeholders found in row {placeholder_row} of sheet '{ws.title}'."
+        )
+
+    records = []
+    for raw_row in rows[data_start_row - 1:]:
+        if not any(c is not None and str(c).strip() != "" for c in raw_row):
+            continue
+
+        mappings = []
+        for col_idx, placeholder in placeholder_columns:
+            if col_idx >= len(raw_row):
+                continue
+            val = raw_row[col_idx]
+            if val is None:
+                continue
+            s = str(val).strip()
+            if not s:
+                continue
+            mappings.append((placeholder, format_value(placeholder, val)))
+
+        if not mappings:
+            continue
+
+        mappings.sort(key=lambda x: len(x[0]), reverse=True)
+        records.append({"mappings": mappings, "row": raw_row})
+
+    return records, placeholder_columns, header_row_vals
+
+def safe_filename_part(value, fallback="record"):
+    """Sanitizes a value for use in a filename."""
+    if value is None:
+        return fallback
+    if isinstance(value, (datetime.datetime, datetime.date)):
+        s = value.strftime("%Y-%m-%d")
+    else:
+        s = str(value)
+    s = re.sub(r"[^A-Za-z0-9._-]+", "_", s).strip("_")
+    return s or fallback
 
 def get_all_runs(paragraph):
     """Helper to extract all runs from a paragraph, including those in hyperlinks."""

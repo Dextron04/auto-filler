@@ -7,6 +7,8 @@ from flask_cors import CORS
 from core_logic import (
     read_excel_mappings,
     read_excel_records,
+    read_excel_records_column_oriented,
+    is_scs_procedure,
     fill_document,
     safe_filename_part,
 )
@@ -192,6 +194,101 @@ def bulk_process():
                 as_attachment=True,
                 download_name=zip_name,
             )
+
+    except Exception as e:
+        return jsonify({'error': f'Processing error: {str(e)}'}), 500
+
+@app.route('/api/bulk-multi', methods=['POST'])
+def bulk_multi_process():
+    """Multi-template bulk fill. One Excel (column-oriented "Fields to Replace"
+    sheet) + two Word templates (SCS + default). Per record, pick template by
+    detecting Spinal Cord Stimulator procedures, fill, and ZIP all docs.
+    """
+    if 'excel' not in request.files:
+        return jsonify({'error': 'Missing excel file'}), 400
+    if 'word_scs' not in request.files or 'word_default' not in request.files:
+        return jsonify({'error': 'Missing template (need word_scs and word_default)'}), 400
+
+    excel_file = request.files['excel']
+    scs_file = request.files['word_scs']
+    default_file = request.files['word_default']
+
+    if not excel_file.filename or not scs_file.filename or not default_file.filename:
+        return jsonify({'error': 'No files selected'}), 400
+
+    scs_bytes = scs_file.read()
+    default_bytes = default_file.read()
+    if not scs_bytes or not default_bytes:
+        return jsonify({'error': 'Word template is empty'}), 400
+
+    sheet_name = request.form.get('sheet') or None
+
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            excel_path = os.path.join(temp_dir, excel_file.filename)
+            excel_file.save(excel_path)
+
+            try:
+                records = read_excel_records_column_oriented(
+                    excel_path, sheet_name=sheet_name
+                )
+            except Exception as e:
+                return jsonify({'error': f'Excel processing error: {str(e)}'}), 400
+
+            if not records:
+                return jsonify({'error': 'No data records found to fill'}), 400
+
+            scs_stem = os.path.splitext(scs_file.filename)[0]
+            default_stem = os.path.splitext(default_file.filename)[0]
+
+            zip_buffer = BytesIO()
+            used_names = set()
+            scs_count = 0
+            default_count = 0
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for idx, record in enumerate(records, start=1):
+                    is_scs = is_scs_procedure(record.get('procedure'))
+                    template_bytes = scs_bytes if is_scs else default_bytes
+                    template_stem = scs_stem if is_scs else default_stem
+                    if is_scs:
+                        scs_count += 1
+                    else:
+                        default_count += 1
+
+                    doc, _ = fill_document(BytesIO(template_bytes), record['mappings'])
+
+                    parts = [template_stem]
+                    if record.get('patient_name'):
+                        parts.append(safe_filename_part(record['patient_name']))
+                    if record.get('dispute_id'):
+                        parts.append(safe_filename_part(record['dispute_id']))
+                    if not record.get('patient_name') and not record.get('dispute_id'):
+                        parts.append(f"row{idx:03d}")
+
+                    base = "_".join(parts)
+                    name = f"{base}.docx"
+                    n = 2
+                    while name in used_names:
+                        name = f"{base}_{n}.docx"
+                        n += 1
+                    used_names.add(name)
+
+                    file_buffer = BytesIO()
+                    doc.save(file_buffer)
+                    file_buffer.seek(0)
+                    zf.writestr(name, file_buffer.getvalue())
+
+            zip_buffer.seek(0)
+            response = send_file(
+                zip_buffer,
+                mimetype='application/zip',
+                as_attachment=True,
+                download_name='multi_template_bulk_filled.zip',
+            )
+            response.headers['X-SCS-Count'] = str(scs_count)
+            response.headers['X-Default-Count'] = str(default_count)
+            response.headers['Access-Control-Expose-Headers'] = 'X-SCS-Count, X-Default-Count, Content-Disposition'
+            return response
 
     except Exception as e:
         return jsonify({'error': f'Processing error: {str(e)}'}), 500

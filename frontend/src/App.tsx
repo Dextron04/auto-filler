@@ -6,12 +6,15 @@ import './index.css';
 const API_BASE = 'http://127.0.0.1:5001/api';
 const SINGLE_URL = `${API_BASE}/process`;
 const BULK_URL = `${API_BASE}/bulk`;
+const MULTI_URL = `${API_BASE}/bulk-multi`;
 
-type Mode = 'single' | 'bulk';
+type Mode = 'single' | 'bulk' | 'multi';
 
 function App() {
   const [excelFile, setExcelFile] = useState<File | null>(null);
   const [wordFiles, setWordFiles] = useState<FileList | null>(null);
+  const [scsFile, setScsFile] = useState<File | null>(null);
+  const [defaultFile, setDefaultFile] = useState<File | null>(null);
   const [mode, setMode] = useState<Mode>('single');
   const [isProcessing, setIsProcessing] = useState(false);
   const [status, setStatus] = useState('');
@@ -19,6 +22,8 @@ function App() {
 
   const excelInputRef = useRef<HTMLInputElement>(null);
   const wordInputRef = useRef<HTMLInputElement>(null);
+  const scsInputRef = useRef<HTMLInputElement>(null);
+  const defaultInputRef = useRef<HTMLInputElement>(null);
 
   const handleExcelChange = (e: ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -32,16 +37,35 @@ function App() {
     }
   };
 
+  const handleScsChange = (e: ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      setScsFile(e.target.files[0]);
+    }
+  };
+
+  const handleDefaultChange = (e: ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      setDefaultFile(e.target.files[0]);
+    }
+  };
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!excelFile || !wordFiles) {
-      alert("Please select both an Excel file and Word templates.");
-      return;
-    }
 
-    if (mode === 'bulk' && wordFiles.length !== 1) {
-      alert("Bulk mode expects exactly one Word template.");
-      return;
+    if (mode === 'multi') {
+      if (!excelFile || !scsFile || !defaultFile) {
+        alert("Please select Excel, SCS template, and Default template.");
+        return;
+      }
+    } else {
+      if (!excelFile || !wordFiles) {
+        alert("Please select both an Excel file and Word templates.");
+        return;
+      }
+      if (mode === 'bulk' && wordFiles.length !== 1) {
+        alert("Bulk mode expects exactly one Word template.");
+        return;
+      }
     }
 
     setIsProcessing(true);
@@ -49,12 +73,19 @@ function App() {
     setProgress(30);
 
     const formData = new FormData();
-    formData.append('excel', excelFile);
-    Array.from(wordFiles).forEach((file) => {
-      formData.append('word', file);
-    });
+    formData.append('excel', excelFile!);
 
-    const endpoint = mode === 'bulk' ? BULK_URL : SINGLE_URL;
+    if (mode === 'multi') {
+      formData.append('word_scs', scsFile!);
+      formData.append('word_default', defaultFile!);
+    } else {
+      Array.from(wordFiles!).forEach((file) => {
+        formData.append('word', file);
+      });
+    }
+
+    const endpoint =
+      mode === 'multi' ? MULTI_URL : mode === 'bulk' ? BULK_URL : SINGLE_URL;
 
     try {
       const response = await axios.post(endpoint, formData, {
@@ -68,19 +99,27 @@ function App() {
       });
 
       setProgress(100);
-      setStatus('Success! Download started.');
+      const scsCount = response.headers['x-scs-count'];
+      const defCount = response.headers['x-default-count'];
+      if (mode === 'multi' && scsCount !== undefined) {
+        setStatus(`Success! ${scsCount} SCS + ${defCount} Default = ${Number(scsCount) + Number(defCount)} docs.`);
+      } else {
+        setStatus('Success! Download started.');
+      }
 
       // Handle download
       const contentDisposition = response.headers['content-disposition'];
       let filename: string;
-      if (mode === 'bulk') {
-        filename = `${wordFiles[0].name.split('.')[0]}_bulk_filled.zip`;
+      if (mode === 'multi') {
+        filename = 'multi_template_bulk_filled.zip';
+      } else if (mode === 'bulk') {
+        filename = `${wordFiles![0].name.split('.')[0]}_bulk_filled.zip`;
       } else {
-        filename = wordFiles.length === 1
-          ? `${wordFiles[0].name.split('.')[0]}_filled.docx`
+        filename = wordFiles!.length === 1
+          ? `${wordFiles![0].name.split('.')[0]}_filled.docx`
           : 'filled_documents.zip';
       }
-      
+
       if (contentDisposition) {
         const filenameMatch = contentDisposition.match(/filename="?(.+)"?/);
         if (filenameMatch && filenameMatch[1]) {
@@ -101,14 +140,42 @@ function App() {
         setIsProcessing(false);
         setProgress(0);
         setStatus('');
-      }, 3000);
+      }, 4000);
 
     } catch (error: any) {
       console.error('Error processing files:', error);
-      setStatus(`Error: ${error.response?.data?.error || error.message}`);
+      let msg = error.message;
+      // Blob error responses need to be parsed
+      if (error.response?.data instanceof Blob) {
+        try {
+          const text = await error.response.data.text();
+          const json = JSON.parse(text);
+          msg = json.error || msg;
+        } catch {
+          // ignore
+        }
+      } else if (error.response?.data?.error) {
+        msg = error.response.data.error;
+      }
+      setStatus(`Error: ${msg}`);
       setIsProcessing(false);
     }
   };
+
+  const modeHint =
+    mode === 'single'
+      ? 'Uses the "Fields to Enter" sheet (one placeholder per row).'
+      : mode === 'bulk'
+        ? 'Uses the "Export" sheet — placeholders in row 1, one filled doc per data row.'
+        : 'Uses the "Fields to Replace" sheet (column-oriented). Each record auto-routes to SCS or Default template based on the [Procedure] row.';
+
+  const submitLabel = isProcessing
+    ? 'Processing...'
+    : mode === 'multi'
+      ? 'Run Multi-Template Sweep'
+      : mode === 'bulk'
+        ? 'Run Bulk Sweep'
+        : 'Generate Documents';
 
   return (
     <>
@@ -145,26 +212,31 @@ function App() {
               >
                 Bulk Sweep
               </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={mode === 'multi'}
+                className={`mode-button ${mode === 'multi' ? 'active' : ''}`}
+                onClick={() => setMode('multi')}
+              >
+                Multi-Template
+              </button>
             </div>
-            <p className="mode-hint">
-              {mode === 'single'
-                ? 'Uses the "Fields to Enter" sheet (one placeholder per row).'
-                : 'Uses the "Export" sheet — placeholders in row 1, one filled doc per data row.'}
-            </p>
+            <p className="mode-hint">{modeHint}</p>
             <div className="upload-section">
               <div className="input-group">
                 <label className="section-label">1. Data Source (Excel)</label>
-                <div 
-                  className="file-drop-zone" 
+                <div
+                  className="file-drop-zone"
                   onClick={() => excelInputRef.current?.click()}
                   onDragOver={(e) => e.preventDefault()}
                 >
-                  <input 
-                    type="file" 
-                    ref={excelInputRef} 
+                  <input
+                    type="file"
+                    ref={excelInputRef}
                     onChange={handleExcelChange}
-                    accept=".xlsx" 
-                    hidden 
+                    accept=".xlsx"
+                    hidden
                   />
                   <span className="icon">📊</span>
                   <p className="file-name">
@@ -173,45 +245,85 @@ function App() {
                 </div>
               </div>
 
-              <div className="input-group">
-                <label className="section-label">
-                  {mode === 'bulk' ? '2. Word Template (single)' : '2. Word Templates'}
-                </label>
-                <div
-                  className="file-drop-zone"
-                  onClick={() => wordInputRef.current?.click()}
-                  onDragOver={(e) => e.preventDefault()}
-                >
-                  <input
-                    type="file"
-                    ref={wordInputRef}
-                    onChange={handleWordChange}
-                    accept=".docx"
-                    multiple={mode === 'single'}
-                    hidden
-                  />
-                  <span className="icon">📝</span>
-                  <p className="file-name">
-                    {wordFiles
-                      ? (wordFiles.length === 1 ? wordFiles[0].name : `${wordFiles.length} files selected`)
-                      : (mode === 'bulk'
-                          ? "Drop one Word template here"
-                          : "Drop Word templates here (multiple allowed)")}
-                  </p>
+              {mode === 'multi' ? (
+                <>
+                  <div className="input-group">
+                    <label className="section-label">2. SCS Template (Word)</label>
+                    <div
+                      className="file-drop-zone"
+                      onClick={() => scsInputRef.current?.click()}
+                      onDragOver={(e) => e.preventDefault()}
+                    >
+                      <input
+                        type="file"
+                        ref={scsInputRef}
+                        onChange={handleScsChange}
+                        accept=".docx"
+                        hidden
+                      />
+                      <span className="icon">🧠</span>
+                      <p className="file-name">
+                        {scsFile ? scsFile.name : "Drop the SCS Word template here"}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="input-group">
+                    <label className="section-label">3. Default Template (Word)</label>
+                    <div
+                      className="file-drop-zone"
+                      onClick={() => defaultInputRef.current?.click()}
+                      onDragOver={(e) => e.preventDefault()}
+                    >
+                      <input
+                        type="file"
+                        ref={defaultInputRef}
+                        onChange={handleDefaultChange}
+                        accept=".docx"
+                        hidden
+                      />
+                      <span className="icon">📝</span>
+                      <p className="file-name">
+                        {defaultFile ? defaultFile.name : "Drop the Default (non-SCS) Word template here"}
+                      </p>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="input-group">
+                  <label className="section-label">
+                    {mode === 'bulk' ? '2. Word Template (single)' : '2. Word Templates'}
+                  </label>
+                  <div
+                    className="file-drop-zone"
+                    onClick={() => wordInputRef.current?.click()}
+                    onDragOver={(e) => e.preventDefault()}
+                  >
+                    <input
+                      type="file"
+                      ref={wordInputRef}
+                      onChange={handleWordChange}
+                      accept=".docx"
+                      multiple={mode === 'single'}
+                      hidden
+                    />
+                    <span className="icon">📝</span>
+                    <p className="file-name">
+                      {wordFiles
+                        ? (wordFiles.length === 1 ? wordFiles[0].name : `${wordFiles.length} files selected`)
+                        : (mode === 'bulk'
+                            ? "Drop one Word template here"
+                            : "Drop Word templates here (multiple allowed)")}
+                    </p>
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
 
             <div className="actions">
               <button type="submit" className="premium-button" disabled={isProcessing}>
                 {isProcessing && <div className="loader"></div>}
-                <span>
-                  {isProcessing
-                    ? "Processing..."
-                    : mode === 'bulk'
-                      ? "Run Bulk Sweep"
-                      : "Generate Documents"}
-                </span>
+                <span>{submitLabel}</span>
               </button>
             </div>
           </form>

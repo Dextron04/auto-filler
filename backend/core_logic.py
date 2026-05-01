@@ -120,6 +120,123 @@ def read_excel_records(excel_path, sheet_name=None, placeholder_row=1, header_ro
 
     return records, placeholder_columns, header_row_vals
 
+def read_excel_records_column_oriented(excel_path, sheet_name=None):
+    """Reads a column-oriented sheet where column B holds field names
+    (placeholders like [Procedure] or labels like 'Patient Name') and each
+    subsequent column (C onward) is one record.
+
+    Returns list of dicts: {mappings, patient_name, procedure, dispute_id}.
+    """
+    wb = openpyxl.load_workbook(excel_path, data_only=True)
+
+    ws = None
+    if sheet_name and sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+    else:
+        for name in wb.sheetnames:
+            n = name.lower().strip()
+            if "field" in n and ("replace" in n or "fill" in n or "enter" in n):
+                ws = wb[name]
+                break
+        if ws is None:
+            for name in wb.sheetnames:
+                if "field" in name.lower():
+                    ws = wb[name]
+                    break
+        if ws is None:
+            raise ValueError(f"No field sheet found. Sheets: {wb.sheetnames}")
+
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        raise ValueError(f"Sheet '{ws.title}' is empty.")
+
+    max_cols = max((len(r) for r in rows), default=0)
+    if max_cols < 3:
+        raise ValueError(
+            f"Sheet '{ws.title}' has too few columns for column-oriented fill."
+        )
+
+    placeholder_rows = []
+    patient_row = None
+    procedure_row = None
+    for idx, row in enumerate(rows):
+        if len(row) < 2 or row[1] is None:
+            continue
+        label = str(row[1]).strip()
+        if not label:
+            continue
+        if "[" in label and "]" in label:
+            placeholder_rows.append((idx, label))
+            if re.sub(r"\s+", "", label).lower() == "[procedure]":
+                procedure_row = idx
+        if label.lower() == "patient name":
+            patient_row = idx
+
+    if not placeholder_rows:
+        raise ValueError(
+            f"No bracketed placeholders found in column B of sheet '{ws.title}'."
+        )
+
+    records = []
+    for col in range(2, max_cols):
+        mappings = []
+        for r_idx, placeholder in placeholder_rows:
+            r = rows[r_idx]
+            if col >= len(r):
+                continue
+            val = r[col]
+            if val is None:
+                continue
+            s = str(val).strip()
+            if not s:
+                continue
+            mappings.append((placeholder, format_value(placeholder, val)))
+
+        if not mappings:
+            continue
+
+        mappings.sort(key=lambda x: len(x[0]), reverse=True)
+
+        patient_name = None
+        if patient_row is not None and col < len(rows[patient_row]):
+            v = rows[patient_row][col]
+            if v is not None and str(v).strip():
+                patient_name = str(v).strip()
+
+        procedure = None
+        if procedure_row is not None and col < len(rows[procedure_row]):
+            v = rows[procedure_row][col]
+            if v is not None and str(v).strip():
+                procedure = str(v).strip()
+
+        dispute_id = None
+        for ph, vv in mappings:
+            if re.sub(r"\s+", "", ph).lower().strip("[]") == "disputeid":
+                dispute_id = vv
+                break
+
+        records.append({
+            "mappings": mappings,
+            "patient_name": patient_name,
+            "procedure": procedure,
+            "dispute_id": dispute_id,
+        })
+
+    return records
+
+
+def is_scs_procedure(procedure_text):
+    """True if the procedure text references a Spinal Cord Stimulator."""
+    if not procedure_text:
+        return False
+    s = str(procedure_text)
+    if "spinal cord stimulator" in s.lower():
+        return True
+    if re.search(r"\bSCS\b", s):
+        return True
+    return False
+
+
 def safe_filename_part(value, fallback="record"):
     """Sanitizes a value for use in a filename."""
     if value is None:

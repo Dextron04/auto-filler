@@ -7,8 +7,9 @@ const API_BASE = 'http://127.0.0.1:5001/api';
 const SINGLE_URL = `${API_BASE}/process`;
 const BULK_URL = `${API_BASE}/bulk`;
 const MULTI_URL = `${API_BASE}/bulk-multi`;
+const PS_URL = `${API_BASE}/bulk-ps`;
 
-type Mode = 'single' | 'bulk' | 'multi';
+type Mode = 'single' | 'bulk' | 'multi' | 'ps';
 
 function App() {
   const [excelFile, setExcelFile] = useState<File | null>(null);
@@ -20,10 +21,13 @@ function App() {
   const [status, setStatus] = useState('');
   const [progress, setProgress] = useState(0);
 
+  const [psTemplateFiles, setPsTemplateFiles] = useState<FileList | null>(null);
+
   const excelInputRef = useRef<HTMLInputElement>(null);
   const wordInputRef = useRef<HTMLInputElement>(null);
   const scsInputRef = useRef<HTMLInputElement>(null);
   const defaultInputRef = useRef<HTMLInputElement>(null);
+  const psTemplateInputRef = useRef<HTMLInputElement>(null);
 
   const handleExcelChange = (e: ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -49,12 +53,23 @@ function App() {
     }
   };
 
+  const handlePsTemplateChange = (e: ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      setPsTemplateFiles(e.target.files);
+    }
+  };
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
 
     if (mode === 'multi') {
       if (!excelFile || !scsFile || !defaultFile) {
         alert("Please select Excel, SCS template, and Default template.");
+        return;
+      }
+    } else if (mode === 'ps') {
+      if (!excelFile || !psTemplateFiles || psTemplateFiles.length === 0) {
+        alert("Please select an Excel file and at least one Word template.");
         return;
       }
     } else {
@@ -78,6 +93,10 @@ function App() {
     if (mode === 'multi') {
       formData.append('word_scs', scsFile!);
       formData.append('word_default', defaultFile!);
+    } else if (mode === 'ps') {
+      Array.from(psTemplateFiles!).forEach((file) => {
+        formData.append('word', file);
+      });
     } else {
       Array.from(wordFiles!).forEach((file) => {
         formData.append('word', file);
@@ -85,7 +104,9 @@ function App() {
     }
 
     const endpoint =
-      mode === 'multi' ? MULTI_URL : mode === 'bulk' ? BULK_URL : SINGLE_URL;
+      mode === 'ps' ? PS_URL :
+      mode === 'multi' ? MULTI_URL :
+      mode === 'bulk' ? BULK_URL : SINGLE_URL;
 
     try {
       const response = await axios.post(endpoint, formData, {
@@ -101,8 +122,11 @@ function App() {
       setProgress(100);
       const scsCount = response.headers['x-scs-count'];
       const defCount = response.headers['x-default-count'];
+      const recordCount = response.headers['x-record-count'];
       if (mode === 'multi' && scsCount !== undefined) {
         setStatus(`Success! ${scsCount} SCS + ${defCount} Default = ${Number(scsCount) + Number(defCount)} docs.`);
+      } else if (mode === 'ps' && recordCount !== undefined) {
+        setStatus(`Success! ${recordCount} position statements filled and zipped.`);
       } else {
         setStatus('Success! Download started.');
       }
@@ -110,7 +134,9 @@ function App() {
       // Handle download
       const contentDisposition = response.headers['content-disposition'];
       let filename: string;
-      if (mode === 'multi') {
+      if (mode === 'ps') {
+        filename = 'position_statements_filled.zip';
+      } else if (mode === 'multi') {
         filename = 'multi_template_bulk_filled.zip';
       } else if (mode === 'bulk') {
         filename = `${wordFiles![0].name.split('.')[0]}_bulk_filled.zip`;
@@ -167,15 +193,19 @@ function App() {
       ? 'Uses the "Fields to Enter" sheet (one placeholder per row).'
       : mode === 'bulk'
         ? 'Uses the "Export" sheet — placeholders in row 1, one filled doc per data row.'
-        : 'Uses the "Fields to Replace" sheet (column-oriented). Each record auto-routes to SCS or Default template based on the [Procedure] row.';
+        : mode === 'ps'
+          ? 'Uses the "Field to Fill" sheet. Routes each record to the correct template based on "Number of Comps in Position Statement" and "Procedure Type" rows.'
+          : 'Uses the "Fields to Replace" sheet (column-oriented). Each record auto-routes to SCS or Default template based on the [Procedure] row.';
 
   const submitLabel = isProcessing
     ? 'Processing...'
-    : mode === 'multi'
-      ? 'Run Multi-Template Sweep'
-      : mode === 'bulk'
-        ? 'Run Bulk Sweep'
-        : 'Generate Documents';
+    : mode === 'ps'
+      ? 'Run Position Statement Sweep'
+      : mode === 'multi'
+        ? 'Run Multi-Template Sweep'
+        : mode === 'bulk'
+          ? 'Run Bulk Sweep'
+          : 'Generate Documents';
 
   return (
     <>
@@ -221,6 +251,15 @@ function App() {
               >
                 Multi-Template
               </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={mode === 'ps'}
+                className={`mode-button ${mode === 'ps' ? 'active' : ''}`}
+                onClick={() => setMode('ps')}
+              >
+                Position Statement
+              </button>
             </div>
             <p className="mode-hint">{modeHint}</p>
             <div className="upload-section">
@@ -245,7 +284,38 @@ function App() {
                 </div>
               </div>
 
-              {mode === 'multi' ? (
+              {mode === 'ps' ? (
+                <div className="input-group">
+                  <label className="section-label">2. Word Templates (all carriers variants)</label>
+                  <div
+                    className="file-drop-zone"
+                    onClick={() => psTemplateInputRef.current?.click()}
+                    onDragOver={(e) => e.preventDefault()}
+                  >
+                    <input
+                      type="file"
+                      ref={psTemplateInputRef}
+                      onChange={handlePsTemplateChange}
+                      accept=".docx"
+                      multiple
+                      hidden
+                    />
+                    <span className="icon">📋</span>
+                    <p className="file-name">
+                      {psTemplateFiles
+                        ? `${psTemplateFiles.length} template${psTemplateFiles.length !== 1 ? 's' : ''} selected`
+                        : 'Drop 1–5 carrier templates here (auto-detected by filename)'}
+                    </p>
+                  </div>
+                  {psTemplateFiles && psTemplateFiles.length > 0 && (
+                    <ul className="file-list">
+                      {Array.from(psTemplateFiles).map((f, i) => (
+                        <li key={i}>{f.name}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              ) : mode === 'multi' ? (
                 <>
                   <div className="input-group">
                     <label className="section-label">2. SCS Template (Word)</label>

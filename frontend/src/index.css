@@ -208,6 +208,15 @@ h1 {
     word-break: break-all;
 }
 
+.file-list {
+    margin: 0.5rem 0 0;
+    padding-left: 1.2rem;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    list-style: disc;
+    line-height: 1.6;
+}
+
 /* Button & Progress */
 .actions {
     display: flex;

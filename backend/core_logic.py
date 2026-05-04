@@ -125,7 +125,8 @@ def read_excel_records_column_oriented(excel_path, sheet_name=None):
     (placeholders like [Procedure] or labels like 'Patient Name') and each
     subsequent column (C onward) is one record.
 
-    Returns list of dicts: {mappings, patient_name, procedure, dispute_id}.
+    Returns list of dicts: {mappings, patient_name, procedure, dispute_id,
+                             num_comps, procedure_type}.
     """
     wb = openpyxl.load_workbook(excel_path, data_only=True)
 
@@ -159,6 +160,9 @@ def read_excel_records_column_oriented(excel_path, sheet_name=None):
     placeholder_rows = []
     patient_row = None
     procedure_row = None
+    num_comps_row = None
+    procedure_type_row = None
+
     for idx, row in enumerate(rows):
         if len(row) < 2 or row[1] is None:
             continue
@@ -169,8 +173,13 @@ def read_excel_records_column_oriented(excel_path, sheet_name=None):
             placeholder_rows.append((idx, label))
             if re.sub(r"\s+", "", label).lower() == "[procedure]":
                 procedure_row = idx
-        if label.lower() == "patient name":
+        label_lower = label.lower()
+        if label_lower in ("patient name", "patient"):
             patient_row = idx
+        elif "number of comps" in label_lower:
+            num_comps_row = idx
+        elif label_lower == "procedure type":
+            procedure_type_row = idx
 
     if not placeholder_rows:
         raise ValueError(
@@ -197,17 +206,24 @@ def read_excel_records_column_oriented(excel_path, sheet_name=None):
 
         mappings.sort(key=lambda x: len(x[0]), reverse=True)
 
-        patient_name = None
-        if patient_row is not None and col < len(rows[patient_row]):
-            v = rows[patient_row][col]
-            if v is not None and str(v).strip():
-                patient_name = str(v).strip()
+        def _get_str(row_idx):
+            if row_idx is None or col >= len(rows[row_idx]):
+                return None
+            v = rows[row_idx][col]
+            return str(v).strip() if v is not None and str(v).strip() else None
 
-        procedure = None
-        if procedure_row is not None and col < len(rows[procedure_row]):
-            v = rows[procedure_row][col]
-            if v is not None and str(v).strip():
-                procedure = str(v).strip()
+        patient_name = _get_str(patient_row)
+        procedure = _get_str(procedure_row)
+        procedure_type = _get_str(procedure_type_row)
+
+        num_comps = None
+        if num_comps_row is not None and col < len(rows[num_comps_row]):
+            raw = rows[num_comps_row][col]
+            if raw is not None:
+                try:
+                    num_comps = int(raw)
+                except (ValueError, TypeError):
+                    num_comps = None
 
         dispute_id = None
         for ph, vv in mappings:
@@ -220,6 +236,8 @@ def read_excel_records_column_oriented(excel_path, sheet_name=None):
             "patient_name": patient_name,
             "procedure": procedure,
             "dispute_id": dispute_id,
+            "num_comps": num_comps,
+            "procedure_type": procedure_type,
         })
 
     return records

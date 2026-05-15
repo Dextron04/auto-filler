@@ -8,8 +8,9 @@ const SINGLE_URL = `${API_BASE}/process`;
 const BULK_URL = `${API_BASE}/bulk`;
 const MULTI_URL = `${API_BASE}/bulk-multi`;
 const PS_URL = `${API_BASE}/bulk-ps`;
+const PS_NSA_URL = `${API_BASE}/bulk-ps-nsa`;
 
-type Mode = 'single' | 'bulk' | 'multi' | 'ps';
+type Mode = 'single' | 'bulk' | 'multi' | 'ps' | 'ps_nsa';
 
 function App() {
   const [excelFile, setExcelFile] = useState<File | null>(null);
@@ -67,7 +68,7 @@ function App() {
         alert("Please select Excel, SCS template, and Default template.");
         return;
       }
-    } else if (mode === 'ps') {
+    } else if (mode === 'ps' || mode === 'ps_nsa') {
       if (!excelFile || !psTemplateFiles || psTemplateFiles.length === 0) {
         alert("Please select an Excel file and at least one Word template.");
         return;
@@ -93,7 +94,7 @@ function App() {
     if (mode === 'multi') {
       formData.append('word_scs', scsFile!);
       formData.append('word_default', defaultFile!);
-    } else if (mode === 'ps') {
+    } else if (mode === 'ps' || mode === 'ps_nsa') {
       Array.from(psTemplateFiles!).forEach((file) => {
         formData.append('word', file);
       });
@@ -104,6 +105,7 @@ function App() {
     }
 
     const endpoint =
+      mode === 'ps_nsa' ? PS_NSA_URL :
       mode === 'ps' ? PS_URL :
       mode === 'multi' ? MULTI_URL :
       mode === 'bulk' ? BULK_URL : SINGLE_URL;
@@ -125,7 +127,7 @@ function App() {
       const recordCount = response.headers['x-record-count'];
       if (mode === 'multi' && scsCount !== undefined) {
         setStatus(`Success! ${scsCount} SCS + ${defCount} Default = ${Number(scsCount) + Number(defCount)} docs.`);
-      } else if (mode === 'ps' && recordCount !== undefined) {
+      } else if ((mode === 'ps' || mode === 'ps_nsa') && recordCount !== undefined) {
         setStatus(`Success! ${recordCount} position statements filled and zipped.`);
       } else {
         setStatus('Success! Download started.');
@@ -134,7 +136,9 @@ function App() {
       // Handle download
       const contentDisposition = response.headers['content-disposition'];
       let filename: string;
-      if (mode === 'ps') {
+      if (mode === 'ps_nsa') {
+        filename = 'position_statements_nsa_filled.zip';
+      } else if (mode === 'ps') {
         filename = 'position_statements_filled.zip';
       } else if (mode === 'multi') {
         filename = 'multi_template_bulk_filled.zip';
@@ -195,17 +199,21 @@ function App() {
         ? 'Uses the "Export" sheet — placeholders in row 1, one filled doc per data row.'
         : mode === 'ps'
           ? 'Uses the "Field to Fill" sheet. Routes each record to the correct template based on "Number of Comps in Position Statement" and "Procedure Type" rows.'
-          : 'Uses the "Fields to Replace" sheet (column-oriented). Each record auto-routes to SCS or Default template based on the [Procedure] row.';
+          : mode === 'ps_nsa'
+            ? 'NSA: tabular "Fields to Enter" sheet — placeholders in row 1, headers in row 2, one record per row. Routes by "Comps" + "Procedure Type" columns.'
+            : 'Uses the "Fields to Replace" sheet (column-oriented). Each record auto-routes to SCS or Default template based on the [Procedure] row.';
 
   const submitLabel = isProcessing
     ? 'Processing...'
-    : mode === 'ps'
-      ? 'Run Position Statement Sweep'
-      : mode === 'multi'
-        ? 'Run Multi-Template Sweep'
-        : mode === 'bulk'
-          ? 'Run Bulk Sweep'
-          : 'Generate Documents';
+    : mode === 'ps_nsa'
+      ? 'Run NSA Position Statement Sweep'
+      : mode === 'ps'
+        ? 'Run Position Statement Sweep'
+        : mode === 'multi'
+          ? 'Run Multi-Template Sweep'
+          : mode === 'bulk'
+            ? 'Run Bulk Sweep'
+            : 'Generate Documents';
 
   return (
     <>
@@ -260,6 +268,15 @@ function App() {
               >
                 Position Statement
               </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={mode === 'ps_nsa'}
+                className={`mode-button ${mode === 'ps_nsa' ? 'active' : ''}`}
+                onClick={() => setMode('ps_nsa')}
+              >
+                Position Statement (NSA)
+              </button>
             </div>
             <p className="mode-hint">{modeHint}</p>
             <div className="upload-section">
@@ -284,7 +301,7 @@ function App() {
                 </div>
               </div>
 
-              {mode === 'ps' ? (
+              {mode === 'ps' || mode === 'ps_nsa' ? (
                 <div className="input-group">
                   <label className="section-label">2. Word Templates (all carriers variants)</label>
                   <div

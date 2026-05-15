@@ -8,6 +8,7 @@ from core_logic import (
     read_excel_mappings,
     read_excel_records,
     read_excel_records_column_oriented,
+    read_excel_records_ps_tabular,
     is_scs_procedure,
     fill_document,
     safe_filename_part,
@@ -415,6 +416,115 @@ def bulk_ps_process():
                 mimetype='application/zip',
                 as_attachment=True,
                 download_name='position_statements_filled.zip',
+            )
+            response.headers['X-Record-Count'] = str(len(records))
+            response.headers['X-Template-Counts'] = str(counts)
+            response.headers['Access-Control-Expose-Headers'] = (
+                'X-Record-Count, X-Template-Counts, Content-Disposition'
+            )
+            return response
+
+    except Exception as e:
+        return jsonify({'error': f'Processing error: {str(e)}'}), 500
+
+
+@app.route('/api/bulk-ps-nsa', methods=['POST'])
+def bulk_ps_nsa_process():
+    """NSA Position-Statement bulk fill.
+    Accepts one Excel (tabular 'Fields to Enter' sheet — placeholders in row 1,
+    headers in row 2, one record per data row) and multiple Word templates.
+    Template selection per record uses:
+      - 'Comps' column           -> 0/1/2/3 carriers routing
+      - 'Procedure Type' column  -> pain vs. spine (for 0-comp case; 'Pain' vs 'BS')
+    Template routing keys auto-detected from filenames same as /api/bulk-ps:
+      '1 carriers' -> '1', '2 carriers' -> '2', '3 carriers' -> '3',
+      'no carriers' + 'pain' -> 'no_pain', 'no carriers' -> 'no'
+    """
+    if 'excel' not in request.files:
+        return jsonify({'error': 'Missing excel file'}), 400
+    word_files = request.files.getlist('word')
+    if not word_files:
+        return jsonify({'error': 'No Word templates provided'}), 400
+
+    excel_file = request.files['excel']
+    if not excel_file.filename:
+        return jsonify({'error': 'No excel file selected'}), 400
+
+    templates = {}
+    for wf in word_files:
+        if not wf.filename:
+            continue
+        key = detect_ps_template_key(wf.filename)
+        templates[key] = wf.read()
+
+    if not templates:
+        return jsonify({'error': 'No valid Word templates uploaded'}), 400
+
+    sheet_name = request.form.get('sheet') or None
+
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            excel_path = os.path.join(temp_dir, excel_file.filename)
+            excel_file.save(excel_path)
+
+            try:
+                records = read_excel_records_ps_tabular(
+                    excel_path, sheet_name=sheet_name
+                )
+            except Exception as e:
+                return jsonify({'error': f'Excel processing error: {str(e)}'}), 400
+
+            if not records:
+                return jsonify({'error': 'No data records found to fill'}), 400
+
+            counts = {k: 0 for k in templates}
+            zip_buffer = BytesIO()
+            used_names = set()
+
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for idx, record in enumerate(records, start=1):
+                    num_comps = record.get('num_comps')
+                    procedure_type = record.get('procedure_type') or ''
+                    tmpl_bytes = select_ps_template(num_comps, procedure_type, templates)
+
+                    if tmpl_bytes is None:
+                        continue
+
+                    doc, _ = fill_document(BytesIO(tmpl_bytes), record['mappings'])
+
+                    parts = []
+                    if record.get('patient_name'):
+                        parts.append(safe_filename_part(record['patient_name']))
+                    if record.get('dispute_id'):
+                        parts.append(safe_filename_part(record['dispute_id']))
+                    if not parts:
+                        parts.append(f"row{idx:03d}")
+
+                    base = "_".join(parts)
+                    name = f"{base}.docx"
+                    n = 2
+                    while name in used_names:
+                        name = f"{base}_{n}.docx"
+                        n += 1
+                    used_names.add(name)
+
+                    file_buffer = BytesIO()
+                    doc.save(file_buffer)
+                    zf.writestr(name, file_buffer.getvalue())
+
+                    comp_key = str(num_comps) if num_comps else (
+                        'no_pain' if 'pain' in procedure_type.lower() else 'no'
+                    )
+                    if comp_key not in counts:
+                        counts[comp_key] = 0
+                    counts[comp_key] += 1
+
+            zip_buffer.seek(0)
+            response = send_file(
+                zip_buffer,
+                mimetype='application/zip',
+                as_attachment=True,
+                download_name='position_statements_nsa_filled.zip',
             )
             response.headers['X-Record-Count'] = str(len(records))
             response.headers['X-Template-Counts'] = str(counts)

@@ -120,6 +120,130 @@ def read_excel_records(excel_path, sheet_name=None, placeholder_row=1, header_ro
 
     return records, placeholder_columns, header_row_vals
 
+def read_excel_records_ps_tabular(excel_path, sheet_name=None,
+                                   placeholder_row=1, header_row=2, data_start_row=3):
+    """Tabular PS reader (NSA-style sheet).
+
+    Same layout as read_excel_records but enriches each record with:
+      patient_name, dispute_id, num_comps, procedure_type
+
+    Header detection (case-insensitive substring on header row):
+      'patient name' / 'patient'        -> patient_name
+      'refid' / 'dispute id'            -> dispute_id
+      'comps'                           -> num_comps (int)
+      first 'procedure type'            -> procedure_type (e.g. 'BS' / 'Pain')
+
+    Default sheet pick: a sheet name containing 'field' (e.g. 'Fields to Enter');
+    falls back to first sheet.
+    """
+    wb = openpyxl.load_workbook(excel_path, data_only=True)
+
+    ws = None
+    if sheet_name and sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+    else:
+        for name in wb.sheetnames:
+            if "field" in name.lower():
+                ws = wb[name]
+                break
+        if ws is None:
+            ws = wb[wb.sheetnames[0]]
+
+    rows = list(ws.iter_rows(values_only=True))
+    if len(rows) < data_start_row:
+        raise ValueError(f"Sheet '{ws.title}' has too few rows for tabular PS fill.")
+
+    placeholder_row_vals = rows[placeholder_row - 1]
+    header_row_vals = rows[header_row - 1]
+
+    placeholder_columns = []
+    for idx, cell in enumerate(placeholder_row_vals):
+        if cell is None:
+            continue
+        text = str(cell).strip()
+        if not text or "[" not in text or "]" not in text:
+            continue
+        placeholder_columns.append((idx, text))
+
+    if not placeholder_columns:
+        raise ValueError(
+            f"No bracketed placeholders found in row {placeholder_row} of sheet '{ws.title}'."
+        )
+
+    patient_col = None
+    dispute_col = None
+    comps_col = None
+    proc_type_col = None
+    for i, h in enumerate(header_row_vals or ()):
+        if h is None:
+            continue
+        hl = str(h).strip().lower()
+        if not hl:
+            continue
+        if patient_col is None and hl in ("patient name", "patient"):
+            patient_col = i
+        if dispute_col is None and ("refid" in hl or hl == "dispute id"):
+            dispute_col = i
+        if comps_col is None and hl == "comps":
+            comps_col = i
+        if proc_type_col is None and hl == "procedure type":
+            proc_type_col = i
+
+    records = []
+    for raw_row in rows[data_start_row - 1:]:
+        if not any(c is not None and str(c).strip() != "" for c in raw_row):
+            continue
+
+        mappings = []
+        for col_idx, placeholder in placeholder_columns:
+            if col_idx >= len(raw_row):
+                continue
+            val = raw_row[col_idx]
+            if val is None:
+                continue
+            s = str(val).strip()
+            if not s:
+                continue
+            mappings.append((placeholder, format_value(placeholder, val)))
+
+        if not mappings:
+            continue
+
+        mappings.sort(key=lambda x: len(x[0]), reverse=True)
+
+        def _cell(idx):
+            if idx is None or idx >= len(raw_row):
+                return None
+            v = raw_row[idx]
+            if v is None:
+                return None
+            s = str(v).strip()
+            return s if s else None
+
+        num_comps = None
+        if comps_col is not None and comps_col < len(raw_row):
+            raw = raw_row[comps_col]
+            if raw is not None:
+                try:
+                    num_comps = int(raw)
+                except (ValueError, TypeError):
+                    try:
+                        num_comps = int(float(raw))
+                    except (ValueError, TypeError):
+                        num_comps = None
+
+        records.append({
+            "mappings": mappings,
+            "row": raw_row,
+            "patient_name": _cell(patient_col),
+            "dispute_id": _cell(dispute_col),
+            "num_comps": num_comps,
+            "procedure_type": _cell(proc_type_col),
+        })
+
+    return records
+
+
 def read_excel_records_column_oriented(excel_path, sheet_name=None):
     """Reads a column-oriented sheet where column B holds field names
     (placeholders like [Procedure] or labels like 'Patient Name') and each

@@ -120,37 +120,22 @@ def read_excel_records(excel_path, sheet_name=None, placeholder_row=1, header_ro
 
     return records, placeholder_columns, header_row_vals
 
-# NSA sheet fixed column indices (0-based). These columns have no bracket
-# label in row 0 but carry data that maps to a template placeholder.
-NSA_EXTRA_PLACEHOLDER_COLS = {
-    "[date of service]": 28,   # 'DOS' column
-    "[dispute ID]": 39,        # 'Payor_Claim' column — holds NSA dispute ID
-}
-
-# Template alias: templates use [tech] but header says [technologist]
-NSA_TECH_ALIAS = "[tech]"
-NSA_TECH_LABEL = "[technologist]"
-
-# Row indices (0-based) for routing / filename metadata
+# Row indices (0-based) for routing / filename metadata (non-bracketed cols)
 NSA_PATIENT_COL   = 1    # 'Patient Name'
 NSA_COMPS_COL     = 8    # 'Comps'
 NSA_PROC_TYPE_COL = 7    # 'Category' (B&S / Pain)
-NSA_DISPUTE_COL   = 39   # 'Payor_Claim' — NSA dispute ID
 
 
 def read_excel_records_ps_tabular(excel_path, sheet_name=None):
     """NSA tabular PS reader.
 
-    Sheet shape (Book1.xlsx 'Fields to Enter'):
-      row 0  -> column headers; columns that hold template variables already
-                carry the bracketed placeholder as their header label (e.g.
-                '[provider]', '[carrier]', etc.).  The column index in row 0
-                IS the data column for that placeholder.
+    Sheet shape ('Fields to Enter'):
+      row 0  -> column headers; columns with bracketed labels are the
+                exact placeholders at those data column positions.
       row 1+ -> one record per data row.
 
-    Auto-detects bracketed placeholders from row 0.
-    Adds '[date of service]' from the 'DOS' column (NSA_EXTRA_PLACEHOLDER_COLS).
-    Adds '[tech]' alias for '[technologist]' so both template variants work.
+    Pure auto-detect: only fills placeholders that appear as [bracket]
+    labels in row 0. No extra mappings or aliases.
 
     Returns list of dicts: {mappings, patient_name, dispute_id,
                             num_comps, procedure_type, row}.
@@ -174,24 +159,14 @@ def read_excel_records_ps_tabular(excel_path, sheet_name=None):
 
     header_row = rows[0]
 
-    # Build placeholder -> col_idx from row 0 bracket labels
-    auto_cols = {}
+    # Auto-detect bracketed placeholder cols from row 0 only — no extras
+    placeholder_cols = {}
     for ci, cell in enumerate(header_row):
         if cell is None:
             continue
         text = str(cell).strip()
         if "[" in text and "]" in text:
-            auto_cols[text] = ci
-
-    # Merge extra fixed cols (DOS etc.)
-    placeholder_cols = dict(auto_cols)
-    for ph, ci in NSA_EXTRA_PLACEHOLDER_COLS.items():
-        if ph not in placeholder_cols:
-            placeholder_cols[ph] = ci
-
-    # Add [tech] alias if [technologist] was detected
-    if NSA_TECH_LABEL in placeholder_cols and NSA_TECH_ALIAS not in placeholder_cols:
-        placeholder_cols[NSA_TECH_ALIAS] = placeholder_cols[NSA_TECH_LABEL]
+            placeholder_cols[text] = ci
 
     if not placeholder_cols:
         raise ValueError(
@@ -247,11 +222,18 @@ def read_excel_records_ps_tabular(excel_path, sheet_name=None):
                 except (ValueError, TypeError):
                     num_comps = None
 
+        # Derive dispute_id from [dispute ID] mapping value if present
+        dispute_id = None
+        for ph, v in mappings:
+            if ph.lower().strip() == '[dispute id]':
+                dispute_id = v
+                break
+
         records.append({
             "mappings": mappings,
             "row": raw_row,
             "patient_name": _cell_str(raw_row, NSA_PATIENT_COL),
-            "dispute_id": _cell_str(raw_row, NSA_DISPUTE_COL),
+            "dispute_id": dispute_id,
             "num_comps": num_comps,
             "procedure_type": _cell_str(raw_row, NSA_PROC_TYPE_COL),
         })
@@ -259,18 +241,9 @@ def read_excel_records_ps_tabular(excel_path, sheet_name=None):
     return records
 
 
-# UPM sheet fixed cols (0-based, no bracket label in row 0)
+# UPM sheet fixed cols (0-based, non-bracketed metadata cols)
 UPM_PATIENT_COL    = 0   # 'Patient Name'
 UPM_CLAIM_TYPE_COL = 3   # 'ClaimType' → 'TDI' or 'NSA'
-UPM_DISPUTE_COL    = 33  # 'Payor_Claim' — dispute/claim number for filename
-
-# Alias map: template placeholder -> Excel header placeholder that holds same data.
-# Used when template and Excel use different names for the same field.
-UPM_PLACEHOLDER_ALIASES = {
-    "[CMS – Public Use File Award Count]": "[CMS disputed claims]",  # col 52
-    "[$CMS-PUF]": "[$CMS – PUF value]",                             # col 53
-    "[cms to billed charges %]": "[cms to billed charges %]",       # identical, no-op
-}
 
 
 def read_excel_records_upm(excel_path, sheet_name=None):
@@ -350,27 +323,22 @@ def read_excel_records_upm(excel_path, sheet_name=None):
         if not mappings:
             continue
 
-        # Add alias entries so template placeholders with different names still fill
-        existing_keys = {ph for ph, _ in mappings}
-        alias_additions = []
-        # Build reverse lookup: excel_placeholder -> value from mappings
-        val_by_ph = {ph.lower(): v for ph, v in mappings}
-        for tmpl_ph, excel_ph in UPM_PLACEHOLDER_ALIASES.items():
-            if tmpl_ph in existing_keys:
-                continue  # already present
-            v = val_by_ph.get(excel_ph.lower())
-            if v is not None:
-                alias_additions.append((tmpl_ph, v))
-        mappings = alias_additions + mappings
         mappings.sort(key=lambda x: len(x[0]), reverse=True)
 
         case_type = _cell_str(raw_row, UPM_CLAIM_TYPE_COL) or ''
+
+        # Derive dispute_id from [dispute ID] mapping value if present
+        dispute_id = None
+        for ph, v in mappings:
+            if ph.lower().strip() == '[dispute id]':
+                dispute_id = v
+                break
 
         records.append({
             "mappings": mappings,
             "row": raw_row,
             "patient_name": _cell_str(raw_row, UPM_PATIENT_COL),
-            "dispute_id": _cell_str(raw_row, UPM_DISPUTE_COL),
+            "dispute_id": dispute_id,
             "case_type": case_type.upper(),
         })
 

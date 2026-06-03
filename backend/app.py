@@ -9,6 +9,7 @@ from core_logic import (
     read_excel_records,
     read_excel_records_column_oriented,
     read_excel_records_ps_tabular,
+    read_excel_records_upm,
     is_scs_procedure,
     fill_document,
     safe_filename_part,
@@ -528,6 +529,104 @@ def bulk_ps_nsa_process():
             response.headers['X-Template-Counts'] = str(counts)
             response.headers['Access-Control-Expose-Headers'] = (
                 'X-Record-Count, X-Template-Counts, Content-Disposition'
+            )
+            return response
+
+    except Exception as e:
+        return jsonify({'error': f'Processing error: {str(e)}'}), 500
+
+
+@app.route('/api/bulk-upm', methods=['POST'])
+def bulk_upm_process():
+    """UPM Anesthesia bulk fill.
+    Accepts one Excel (tabular 'Sheet1' — bracketed placeholders in row 0,
+    one record per data row) + one NSA Word template + one TDI Word template.
+    Routes each record to NSA or TDI template by ClaimType column (col 3).
+    Returns ZIP of filled position statements.
+    """
+    if 'excel' not in request.files:
+        return jsonify({'error': 'Missing excel file'}), 400
+    if 'word_nsa' not in request.files or 'word_tdi' not in request.files:
+        return jsonify({'error': 'Missing templates (need word_nsa and word_tdi)'}), 400
+
+    excel_file = request.files['excel']
+    nsa_file = request.files['word_nsa']
+    tdi_file = request.files['word_tdi']
+
+    if not excel_file.filename or not nsa_file.filename or not tdi_file.filename:
+        return jsonify({'error': 'No files selected'}), 400
+
+    nsa_bytes = nsa_file.read()
+    tdi_bytes = tdi_file.read()
+    if not nsa_bytes or not tdi_bytes:
+        return jsonify({'error': 'Word template is empty'}), 400
+
+    sheet_name = request.form.get('sheet') or None
+
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            excel_path = os.path.join(temp_dir, excel_file.filename)
+            excel_file.save(excel_path)
+
+            try:
+                records = read_excel_records_upm(excel_path, sheet_name=sheet_name)
+            except Exception as e:
+                return jsonify({'error': f'Excel processing error: {str(e)}'}), 400
+
+            if not records:
+                return jsonify({'error': 'No data records found to fill'}), 400
+
+            counts = {'NSA': 0, 'TDI': 0, 'unknown': 0}
+            zip_buffer = BytesIO()
+            used_names = set()
+
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for idx, record in enumerate(records, start=1):
+                    case_type = record.get('case_type', '')
+                    if 'NSA' in case_type:
+                        tmpl_bytes = nsa_bytes
+                        counts['NSA'] += 1
+                    elif 'TDI' in case_type:
+                        tmpl_bytes = tdi_bytes
+                        counts['TDI'] += 1
+                    else:
+                        tmpl_bytes = tdi_bytes   # fallback
+                        counts['unknown'] += 1
+
+                    doc, _ = fill_document(BytesIO(tmpl_bytes), record['mappings'])
+
+                    parts = []
+                    if record.get('patient_name'):
+                        parts.append(safe_filename_part(record['patient_name']))
+                    if record.get('dispute_id'):
+                        parts.append(safe_filename_part(record['dispute_id']))
+                    if not parts:
+                        parts.append(f"row{idx:03d}")
+
+                    base = "_".join(parts)
+                    name = f"{base}.docx"
+                    n = 2
+                    while name in used_names:
+                        name = f"{base}_{n}.docx"
+                        n += 1
+                    used_names.add(name)
+
+                    file_buffer = BytesIO()
+                    doc.save(file_buffer)
+                    zf.writestr(name, file_buffer.getvalue())
+
+            zip_buffer.seek(0)
+            response = send_file(
+                zip_buffer,
+                mimetype='application/zip',
+                as_attachment=True,
+                download_name='upm_position_statements.zip',
+            )
+            response.headers['X-Record-Count'] = str(len(records))
+            response.headers['X-NSA-Count'] = str(counts['NSA'])
+            response.headers['X-TDI-Count'] = str(counts['TDI'])
+            response.headers['Access-Control-Expose-Headers'] = (
+                'X-Record-Count, X-NSA-Count, X-TDI-Count, Content-Disposition'
             )
             return response
 

@@ -9,8 +9,9 @@ const BULK_URL = `${API_BASE}/bulk`;
 const MULTI_URL = `${API_BASE}/bulk-multi`;
 const PS_URL = `${API_BASE}/bulk-ps`;
 const PS_NSA_URL = `${API_BASE}/bulk-ps-nsa`;
+const UPM_URL = `${API_BASE}/bulk-upm`;
 
-type Mode = 'single' | 'bulk' | 'multi' | 'ps' | 'ps_nsa';
+type Mode = 'single' | 'bulk' | 'multi' | 'ps' | 'ps_nsa' | 'upm';
 
 function App() {
   const [excelFile, setExcelFile] = useState<File | null>(null);
@@ -23,12 +24,16 @@ function App() {
   const [progress, setProgress] = useState(0);
 
   const [psTemplateFiles, setPsTemplateFiles] = useState<FileList | null>(null);
+  const [upmNsaFile, setUpmNsaFile] = useState<File | null>(null);
+  const [upmTdiFile, setUpmTdiFile] = useState<File | null>(null);
 
   const excelInputRef = useRef<HTMLInputElement>(null);
   const wordInputRef = useRef<HTMLInputElement>(null);
   const scsInputRef = useRef<HTMLInputElement>(null);
   const defaultInputRef = useRef<HTMLInputElement>(null);
   const psTemplateInputRef = useRef<HTMLInputElement>(null);
+  const upmNsaInputRef = useRef<HTMLInputElement>(null);
+  const upmTdiInputRef = useRef<HTMLInputElement>(null);
 
   const handleExcelChange = (e: ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -60,6 +65,14 @@ function App() {
     }
   };
 
+  const handleUpmNsaChange = (e: ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) setUpmNsaFile(e.target.files[0]);
+  };
+
+  const handleUpmTdiChange = (e: ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) setUpmTdiFile(e.target.files[0]);
+  };
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
 
@@ -71,6 +84,11 @@ function App() {
     } else if (mode === 'ps' || mode === 'ps_nsa') {
       if (!excelFile || !psTemplateFiles || psTemplateFiles.length === 0) {
         alert("Please select an Excel file and at least one Word template.");
+        return;
+      }
+    } else if (mode === 'upm') {
+      if (!excelFile || !upmNsaFile || !upmTdiFile) {
+        alert("Please select Excel, NSA template, and TDI template.");
         return;
       }
     } else {
@@ -94,6 +112,9 @@ function App() {
     if (mode === 'multi') {
       formData.append('word_scs', scsFile!);
       formData.append('word_default', defaultFile!);
+    } else if (mode === 'upm') {
+      formData.append('word_nsa', upmNsaFile!);
+      formData.append('word_tdi', upmTdiFile!);
     } else if (mode === 'ps' || mode === 'ps_nsa') {
       Array.from(psTemplateFiles!).forEach((file) => {
         formData.append('word', file);
@@ -105,6 +126,7 @@ function App() {
     }
 
     const endpoint =
+      mode === 'upm' ? UPM_URL :
       mode === 'ps_nsa' ? PS_NSA_URL :
       mode === 'ps' ? PS_URL :
       mode === 'multi' ? MULTI_URL :
@@ -125,7 +147,11 @@ function App() {
       const scsCount = response.headers['x-scs-count'];
       const defCount = response.headers['x-default-count'];
       const recordCount = response.headers['x-record-count'];
-      if (mode === 'multi' && scsCount !== undefined) {
+      const nsaCount = response.headers['x-nsa-count'];
+      const tdiCount = response.headers['x-tdi-count'];
+      if (mode === 'upm' && nsaCount !== undefined) {
+        setStatus(`Success! ${nsaCount} NSA + ${tdiCount} TDI = ${Number(nsaCount) + Number(tdiCount)} docs.`);
+      } else if (mode === 'multi' && scsCount !== undefined) {
         setStatus(`Success! ${scsCount} SCS + ${defCount} Default = ${Number(scsCount) + Number(defCount)} docs.`);
       } else if ((mode === 'ps' || mode === 'ps_nsa') && recordCount !== undefined) {
         setStatus(`Success! ${recordCount} position statements filled and zipped.`);
@@ -136,7 +162,9 @@ function App() {
       // Handle download
       const contentDisposition = response.headers['content-disposition'];
       let filename: string;
-      if (mode === 'ps_nsa') {
+      if (mode === 'upm') {
+        filename = 'upm_position_statements.zip';
+      } else if (mode === 'ps_nsa') {
         filename = 'position_statements_nsa_filled.zip';
       } else if (mode === 'ps') {
         filename = 'position_statements_filled.zip';
@@ -201,19 +229,23 @@ function App() {
           ? 'Uses the "Field to Fill" sheet. Routes each record to the correct template based on "Number of Comps in Position Statement" and "Procedure Type" rows.'
           : mode === 'ps_nsa'
             ? 'NSA: tabular "Fields to Enter" sheet — placeholder labels row 1, one record per data row, fixed column layout. Routes by Comps (col I) + Procedure Type (col H, B&S/Pain).'
-            : 'Uses the "Fields to Replace" sheet (column-oriented). Each record auto-routes to SCS or Default template based on the [Procedure] row.';
+            : mode === 'upm'
+              ? 'UPM Anesthesia: tabular sheet — bracketed placeholders in row 0, one record per data row. Routes TDI vs NSA by ClaimType column.'
+              : 'Uses the "Fields to Replace" sheet (column-oriented). Each record auto-routes to SCS or Default template based on the [Procedure] row.';
 
   const submitLabel = isProcessing
     ? 'Processing...'
-    : mode === 'ps_nsa'
-      ? 'Run NSA Position Statement Sweep'
-      : mode === 'ps'
-        ? 'Run Position Statement Sweep'
-        : mode === 'multi'
-          ? 'Run Multi-Template Sweep'
-          : mode === 'bulk'
-            ? 'Run Bulk Sweep'
-            : 'Generate Documents';
+    : mode === 'upm'
+      ? 'Run UPM Anesthesia Sweep'
+      : mode === 'ps_nsa'
+        ? 'Run NSA Position Statement Sweep'
+        : mode === 'ps'
+          ? 'Run Position Statement Sweep'
+          : mode === 'multi'
+            ? 'Run Multi-Template Sweep'
+            : mode === 'bulk'
+              ? 'Run Bulk Sweep'
+              : 'Generate Documents';
 
   return (
     <>
@@ -277,6 +309,15 @@ function App() {
               >
                 Position Statement (NSA)
               </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={mode === 'upm'}
+                className={`mode-button ${mode === 'upm' ? 'active' : ''}`}
+                onClick={() => setMode('upm')}
+              >
+                UPM Anesthesia
+              </button>
             </div>
             <p className="mode-hint">{modeHint}</p>
             <div className="upload-section">
@@ -301,7 +342,34 @@ function App() {
                 </div>
               </div>
 
-              {mode === 'ps' || mode === 'ps_nsa' ? (
+              {mode === 'upm' ? (
+                <>
+                  <div className="input-group">
+                    <label className="section-label">2. NSA Template (Word)</label>
+                    <div
+                      className="file-drop-zone"
+                      onClick={() => upmNsaInputRef.current?.click()}
+                      onDragOver={(e) => e.preventDefault()}
+                    >
+                      <input type="file" ref={upmNsaInputRef} onChange={handleUpmNsaChange} accept=".docx" hidden />
+                      <span className="icon">📋</span>
+                      <p className="file-name">{upmNsaFile ? upmNsaFile.name : 'Drop the NSA Anesthesia template here'}</p>
+                    </div>
+                  </div>
+                  <div className="input-group">
+                    <label className="section-label">3. TDI Template (Word)</label>
+                    <div
+                      className="file-drop-zone"
+                      onClick={() => upmTdiInputRef.current?.click()}
+                      onDragOver={(e) => e.preventDefault()}
+                    >
+                      <input type="file" ref={upmTdiInputRef} onChange={handleUpmTdiChange} accept=".docx" hidden />
+                      <span className="icon">📝</span>
+                      <p className="file-name">{upmTdiFile ? upmTdiFile.name : 'Drop the TDI Anesthesia template here'}</p>
+                    </div>
+                  </div>
+                </>
+              ) : mode === 'ps' || mode === 'ps_nsa' ? (
                 <div className="input-group">
                   <label className="section-label">2. Word Templates (all carriers variants)</label>
                   <div

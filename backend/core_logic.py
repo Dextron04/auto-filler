@@ -259,6 +259,124 @@ def read_excel_records_ps_tabular(excel_path, sheet_name=None):
     return records
 
 
+# UPM sheet fixed cols (0-based, no bracket label in row 0)
+UPM_PATIENT_COL    = 0   # 'Patient Name'
+UPM_CLAIM_TYPE_COL = 3   # 'ClaimType' → 'TDI' or 'NSA'
+UPM_DISPUTE_COL    = 33  # 'Payor_Claim' — dispute/claim number for filename
+
+# Alias map: template placeholder -> Excel header placeholder that holds same data.
+# Used when template and Excel use different names for the same field.
+UPM_PLACEHOLDER_ALIASES = {
+    "[CMS – Public Use File Award Count]": "[CMS disputed claims]",  # col 52
+    "[$CMS-PUF]": "[$CMS – PUF value]",                             # col 53
+    "[cms to billed charges %]": "[cms to billed charges %]",       # identical, no-op
+}
+
+
+def read_excel_records_upm(excel_path, sheet_name=None):
+    """UPM tabular reader.
+
+    Sheet shape (Book12.xlsx 'Sheet1'):
+      row 0  -> column headers; bracketed headers ARE the placeholder names
+                at their data column index.
+      row 1+ -> one record per row.
+
+    Auto-detects bracketed placeholder columns from row 0.
+    Routes each record by ClaimType column (col 3): 'TDI' or 'NSA'.
+
+    Returns list of dicts: {mappings, patient_name, dispute_id, case_type, row}.
+    """
+    wb = openpyxl.load_workbook(excel_path, data_only=True)
+
+    ws = None
+    if sheet_name and sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+    else:
+        ws = wb[wb.sheetnames[0]]
+
+    rows = list(ws.iter_rows(values_only=True))
+    if len(rows) < 2:
+        raise ValueError(f"Sheet '{ws.title}' has too few rows for UPM fill.")
+
+    header_row = rows[0]
+
+    # Auto-detect bracketed placeholder cols from row 0
+    placeholder_cols = {}
+    for ci, cell in enumerate(header_row):
+        if cell is None:
+            continue
+        text = str(cell).strip()
+        if "[" in text and "]" in text:
+            placeholder_cols[text] = ci
+
+    if not placeholder_cols:
+        raise ValueError(
+            f"No bracketed placeholders found in row 0 of sheet '{ws.title}'."
+        )
+
+    def _cell_value(raw_row, idx):
+        if idx is None or idx >= len(raw_row):
+            return None
+        return raw_row[idx]
+
+    def _cell_str(raw_row, idx):
+        v = _cell_value(raw_row, idx)
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s if s else None
+
+    records = []
+    for raw_row in rows[1:]:
+        if not any(c is not None and str(c).strip() != "" for c in raw_row):
+            continue
+        if _cell_str(raw_row, UPM_PATIENT_COL) is None:
+            continue
+
+        mappings = []
+        seen = set()
+        for placeholder, col_idx in placeholder_cols.items():
+            if placeholder in seen:
+                continue
+            val = _cell_value(raw_row, col_idx)
+            if val is None:
+                continue
+            s = str(val).strip()
+            if not s:
+                continue
+            mappings.append((placeholder, format_value(placeholder, val)))
+            seen.add(placeholder)
+
+        if not mappings:
+            continue
+
+        # Add alias entries so template placeholders with different names still fill
+        existing_keys = {ph for ph, _ in mappings}
+        alias_additions = []
+        # Build reverse lookup: excel_placeholder -> value from mappings
+        val_by_ph = {ph.lower(): v for ph, v in mappings}
+        for tmpl_ph, excel_ph in UPM_PLACEHOLDER_ALIASES.items():
+            if tmpl_ph in existing_keys:
+                continue  # already present
+            v = val_by_ph.get(excel_ph.lower())
+            if v is not None:
+                alias_additions.append((tmpl_ph, v))
+        mappings = alias_additions + mappings
+        mappings.sort(key=lambda x: len(x[0]), reverse=True)
+
+        case_type = _cell_str(raw_row, UPM_CLAIM_TYPE_COL) or ''
+
+        records.append({
+            "mappings": mappings,
+            "row": raw_row,
+            "patient_name": _cell_str(raw_row, UPM_PATIENT_COL),
+            "dispute_id": _cell_str(raw_row, UPM_DISPUTE_COL),
+            "case_type": case_type.upper(),
+        })
+
+    return records
+
+
 def read_excel_records_column_oriented(excel_path, sheet_name=None):
     """Reads a column-oriented sheet where column B holds field names
     (placeholders like [Procedure] or labels like 'Patient Name') and each

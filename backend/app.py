@@ -484,8 +484,9 @@ def bulk_ps_nsa_process():
             with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
                 for idx, record in enumerate(records, start=1):
                     num_comps = record.get('num_comps')
-                    procedure_type = record.get('procedure_type') or ''
-                    tmpl_bytes = select_ps_template(num_comps, procedure_type, templates)
+                    # NSA routing: comps count only
+                    comp_key = str(num_comps) if num_comps else 'no'
+                    tmpl_bytes = templates.get(comp_key) or templates.get('no')
 
                     if tmpl_bytes is None:
                         continue
@@ -512,9 +513,6 @@ def bulk_ps_nsa_process():
                     doc.save(file_buffer)
                     zf.writestr(name, file_buffer.getvalue())
 
-                    comp_key = str(num_comps) if num_comps else (
-                        'no_pain' if 'pain' in procedure_type.lower() else 'no'
-                    )
                     if comp_key not in counts:
                         counts[comp_key] = 0
                     counts[comp_key] += 1

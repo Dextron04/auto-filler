@@ -120,66 +120,40 @@ def read_excel_records(excel_path, sheet_name=None, placeholder_row=1, header_ro
 
     return records, placeholder_columns, header_row_vals
 
-# Fixed column mapping for the NSA "Fields to Enter" sheet (Book1.xlsx layout).
-# Placeholder text -> 0-based data column index. Used by read_excel_records_ps_tabular.
-NSA_PLACEHOLDER_COLS = {
-    "[date of service]": 13,
-    "[dispute ID]": 39,
-    "[provider]": 40,
-    "[procedure]": 45,
-    "[facility]": 56,
-    "[Facility]": 56,
-    "[surgeon]": 57,
-    "[tech]": 58,
-    "[technologist]": 58,
-    "[reader]": 59,
-    "[carrier]": 41,
-    "[alternate carrier]": 67,
-    "[second alternate carrier]": 68,
-    "[carrier EOB count]": 69,
-    "[alternate carrier EOB count]": 70,
-    "[second alternate carrier EOB count]": 71,
-    "[CMS – Public Use File Award Count]": 54,
-    "[CMS – Public Use File Region]": 55,
-    "[diagnosis 1]": 50,
-    "[diagnosis 2]": 51,
-    "[diagnosis 3]": 52,
-    "[diagnosis 4]": 53,
-    "[state]": 43,
-    "[provider rank]": 60,
-    "[providers in market]": 61,
-    "[provider market share %]": 62,
-    "[top three market share %]": 63,
-    "[largest provider market share %]": 64,
-    "[plan rank]": 65,
-    "[plan market share %]": 66,
+# NSA sheet fixed column indices (0-based). These columns have no bracket
+# label in row 0 but carry data that maps to a template placeholder.
+NSA_EXTRA_PLACEHOLDER_COLS = {
+    "[date of service]": 28,   # 'DOS' column
+    "[dispute ID]": 39,        # 'Payor_Claim' column — holds NSA dispute ID
 }
 
-# Row indices (0-based) on the NSA sheet
-NSA_PATIENT_COL = 1
-NSA_COMPS_COL = 8
-NSA_PROC_TYPE_COL = 7      # 'B&S ' / 'Pain'
-NSA_DISPUTE_COL = 39
-NSA_DATA_START_ROW = 1     # row 0 is placeholder labels, data starts at row 1
+# Template alias: templates use [tech] but header says [technologist]
+NSA_TECH_ALIAS = "[tech]"
+NSA_TECH_LABEL = "[technologist]"
+
+# Row indices (0-based) for routing / filename metadata
+NSA_PATIENT_COL   = 1    # 'Patient Name'
+NSA_COMPS_COL     = 8    # 'Comps'
+NSA_PROC_TYPE_COL = 7    # 'Category' (B&S / Pain)
+NSA_DISPUTE_COL   = 39   # 'Payor_Claim' — NSA dispute ID
 
 
-def read_excel_records_ps_tabular(excel_path, sheet_name=None,
-                                   data_start_row=NSA_DATA_START_ROW + 1):
+def read_excel_records_ps_tabular(excel_path, sheet_name=None):
     """NSA tabular PS reader.
 
-    Sheet shape (Book1.xlsx-style):
-      row 0  -> placeholder labels (kept only as documentation; column positions
-                in row 0 do NOT match data columns).
-      row 1+ -> one record per row, columns at fixed positions per
-                NSA_PLACEHOLDER_COLS.
+    Sheet shape (Book1.xlsx 'Fields to Enter'):
+      row 0  -> column headers; columns that hold template variables already
+                carry the bracketed placeholder as their header label (e.g.
+                '[provider]', '[carrier]', etc.).  The column index in row 0
+                IS the data column for that placeholder.
+      row 1+ -> one record per data row.
 
-    Per record returns mappings + patient_name, dispute_id, num_comps,
-    procedure_type (used for template routing).
+    Auto-detects bracketed placeholders from row 0.
+    Adds '[date of service]' from the 'DOS' column (NSA_EXTRA_PLACEHOLDER_COLS).
+    Adds '[tech]' alias for '[technologist]' so both template variants work.
 
-    Default sheet pick: sheet name containing 'field' (e.g. 'Fields to Enter'),
-    fallback to first sheet.
-
-    data_start_row is 1-based for backward compatibility (default 2).
+    Returns list of dicts: {mappings, patient_name, dispute_id,
+                            num_comps, procedure_type, row}.
     """
     wb = openpyxl.load_workbook(excel_path, data_only=True)
 
@@ -195,8 +169,34 @@ def read_excel_records_ps_tabular(excel_path, sheet_name=None,
             ws = wb[wb.sheetnames[0]]
 
     rows = list(ws.iter_rows(values_only=True))
-    if len(rows) < data_start_row:
-        raise ValueError(f"Sheet '{ws.title}' has too few rows for tabular PS fill.")
+    if len(rows) < 2:
+        raise ValueError(f"Sheet '{ws.title}' has too few rows for NSA tabular fill.")
+
+    header_row = rows[0]
+
+    # Build placeholder -> col_idx from row 0 bracket labels
+    auto_cols = {}
+    for ci, cell in enumerate(header_row):
+        if cell is None:
+            continue
+        text = str(cell).strip()
+        if "[" in text and "]" in text:
+            auto_cols[text] = ci
+
+    # Merge extra fixed cols (DOS etc.)
+    placeholder_cols = dict(auto_cols)
+    for ph, ci in NSA_EXTRA_PLACEHOLDER_COLS.items():
+        if ph not in placeholder_cols:
+            placeholder_cols[ph] = ci
+
+    # Add [tech] alias if [technologist] was detected
+    if NSA_TECH_LABEL in placeholder_cols and NSA_TECH_ALIAS not in placeholder_cols:
+        placeholder_cols[NSA_TECH_ALIAS] = placeholder_cols[NSA_TECH_LABEL]
+
+    if not placeholder_cols:
+        raise ValueError(
+            f"No bracketed placeholders found in row 0 of sheet '{ws.title}'."
+        )
 
     def _cell_value(raw_row, idx):
         if idx is None or idx >= len(raw_row):
@@ -211,17 +211,16 @@ def read_excel_records_ps_tabular(excel_path, sheet_name=None,
         return s if s else None
 
     records = []
-    for raw_row in rows[data_start_row - 1:]:
+    for raw_row in rows[1:]:   # data starts at row index 1
         if not any(c is not None and str(c).strip() != "" for c in raw_row):
             continue
-        # Need at least a patient name and comps to count as a record
         if _cell_str(raw_row, NSA_PATIENT_COL) is None:
             continue
 
         mappings = []
-        seen_placeholders = set()
-        for placeholder, col_idx in NSA_PLACEHOLDER_COLS.items():
-            if placeholder in seen_placeholders:
+        seen = set()
+        for placeholder, col_idx in placeholder_cols.items():
+            if placeholder in seen:
                 continue
             val = _cell_value(raw_row, col_idx)
             if val is None:
@@ -230,7 +229,7 @@ def read_excel_records_ps_tabular(excel_path, sheet_name=None,
             if not s:
                 continue
             mappings.append((placeholder, format_value(placeholder, val)))
-            seen_placeholders.add(placeholder)
+            seen.add(placeholder)
 
         if not mappings:
             continue

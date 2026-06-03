@@ -120,21 +120,66 @@ def read_excel_records(excel_path, sheet_name=None, placeholder_row=1, header_ro
 
     return records, placeholder_columns, header_row_vals
 
+# Fixed column mapping for the NSA "Fields to Enter" sheet (Book1.xlsx layout).
+# Placeholder text -> 0-based data column index. Used by read_excel_records_ps_tabular.
+NSA_PLACEHOLDER_COLS = {
+    "[date of service]": 13,
+    "[dispute ID]": 39,
+    "[provider]": 40,
+    "[procedure]": 45,
+    "[facility]": 56,
+    "[Facility]": 56,
+    "[surgeon]": 57,
+    "[tech]": 58,
+    "[technologist]": 58,
+    "[reader]": 59,
+    "[carrier]": 41,
+    "[alternate carrier]": 67,
+    "[second alternate carrier]": 68,
+    "[carrier EOB count]": 69,
+    "[alternate carrier EOB count]": 70,
+    "[second alternate carrier EOB count]": 71,
+    "[CMS – Public Use File Award Count]": 54,
+    "[CMS – Public Use File Region]": 55,
+    "[diagnosis 1]": 50,
+    "[diagnosis 2]": 51,
+    "[diagnosis 3]": 52,
+    "[diagnosis 4]": 53,
+    "[state]": 43,
+    "[provider rank]": 60,
+    "[providers in market]": 61,
+    "[provider market share %]": 62,
+    "[top three market share %]": 63,
+    "[largest provider market share %]": 64,
+    "[plan rank]": 65,
+    "[plan market share %]": 66,
+}
+
+# Row indices (0-based) on the NSA sheet
+NSA_PATIENT_COL = 1
+NSA_COMPS_COL = 8
+NSA_PROC_TYPE_COL = 7      # 'B&S ' / 'Pain'
+NSA_DISPUTE_COL = 39
+NSA_DATA_START_ROW = 1     # row 0 is placeholder labels, data starts at row 1
+
+
 def read_excel_records_ps_tabular(excel_path, sheet_name=None,
-                                   placeholder_row=1, header_row=2, data_start_row=3):
-    """Tabular PS reader (NSA-style sheet).
+                                   data_start_row=NSA_DATA_START_ROW + 1):
+    """NSA tabular PS reader.
 
-    Same layout as read_excel_records but enriches each record with:
-      patient_name, dispute_id, num_comps, procedure_type
+    Sheet shape (Book1.xlsx-style):
+      row 0  -> placeholder labels (kept only as documentation; column positions
+                in row 0 do NOT match data columns).
+      row 1+ -> one record per row, columns at fixed positions per
+                NSA_PLACEHOLDER_COLS.
 
-    Header detection (case-insensitive substring on header row):
-      'patient name' / 'patient'        -> patient_name
-      'refid' / 'dispute id'            -> dispute_id
-      'comps'                           -> num_comps (int)
-      first 'procedure type'            -> procedure_type (e.g. 'BS' / 'Pain')
+    Per record returns mappings + patient_name, dispute_id, num_comps,
+    procedure_type (used for template routing).
 
-    Default sheet pick: a sheet name containing 'field' (e.g. 'Fields to Enter');
-    falls back to first sheet.
+    Default sheet pick: sheet name containing 'field' (e.g. 'Fields to Enter'),
+    fallback to first sheet.
+
+    data_start_row is 1-based for backward compatibility (default 2).
     """
     wb = openpyxl.load_workbook(excel_path, data_only=True)
 
@@ -153,92 +198,63 @@ def read_excel_records_ps_tabular(excel_path, sheet_name=None,
     if len(rows) < data_start_row:
         raise ValueError(f"Sheet '{ws.title}' has too few rows for tabular PS fill.")
 
-    placeholder_row_vals = rows[placeholder_row - 1]
-    header_row_vals = rows[header_row - 1]
+    def _cell_value(raw_row, idx):
+        if idx is None or idx >= len(raw_row):
+            return None
+        return raw_row[idx]
 
-    placeholder_columns = []
-    for idx, cell in enumerate(placeholder_row_vals):
-        if cell is None:
-            continue
-        text = str(cell).strip()
-        if not text or "[" not in text or "]" not in text:
-            continue
-        placeholder_columns.append((idx, text))
-
-    if not placeholder_columns:
-        raise ValueError(
-            f"No bracketed placeholders found in row {placeholder_row} of sheet '{ws.title}'."
-        )
-
-    patient_col = None
-    dispute_col = None
-    comps_col = None
-    proc_type_col = None
-    for i, h in enumerate(header_row_vals or ()):
-        if h is None:
-            continue
-        hl = str(h).strip().lower()
-        if not hl:
-            continue
-        if patient_col is None and hl in ("patient name", "patient"):
-            patient_col = i
-        if dispute_col is None and ("refid" in hl or hl == "dispute id"):
-            dispute_col = i
-        if comps_col is None and hl == "comps":
-            comps_col = i
-        if proc_type_col is None and hl == "procedure type":
-            proc_type_col = i
+    def _cell_str(raw_row, idx):
+        v = _cell_value(raw_row, idx)
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s if s else None
 
     records = []
     for raw_row in rows[data_start_row - 1:]:
         if not any(c is not None and str(c).strip() != "" for c in raw_row):
             continue
+        # Need at least a patient name and comps to count as a record
+        if _cell_str(raw_row, NSA_PATIENT_COL) is None:
+            continue
 
         mappings = []
-        for col_idx, placeholder in placeholder_columns:
-            if col_idx >= len(raw_row):
+        seen_placeholders = set()
+        for placeholder, col_idx in NSA_PLACEHOLDER_COLS.items():
+            if placeholder in seen_placeholders:
                 continue
-            val = raw_row[col_idx]
+            val = _cell_value(raw_row, col_idx)
             if val is None:
                 continue
             s = str(val).strip()
             if not s:
                 continue
             mappings.append((placeholder, format_value(placeholder, val)))
+            seen_placeholders.add(placeholder)
 
         if not mappings:
             continue
 
         mappings.sort(key=lambda x: len(x[0]), reverse=True)
 
-        def _cell(idx):
-            if idx is None or idx >= len(raw_row):
-                return None
-            v = raw_row[idx]
-            if v is None:
-                return None
-            s = str(v).strip()
-            return s if s else None
-
         num_comps = None
-        if comps_col is not None and comps_col < len(raw_row):
-            raw = raw_row[comps_col]
-            if raw is not None:
+        raw_comps = _cell_value(raw_row, NSA_COMPS_COL)
+        if raw_comps is not None:
+            try:
+                num_comps = int(raw_comps)
+            except (ValueError, TypeError):
                 try:
-                    num_comps = int(raw)
+                    num_comps = int(float(raw_comps))
                 except (ValueError, TypeError):
-                    try:
-                        num_comps = int(float(raw))
-                    except (ValueError, TypeError):
-                        num_comps = None
+                    num_comps = None
 
         records.append({
             "mappings": mappings,
             "row": raw_row,
-            "patient_name": _cell(patient_col),
-            "dispute_id": _cell(dispute_col),
+            "patient_name": _cell_str(raw_row, NSA_PATIENT_COL),
+            "dispute_id": _cell_str(raw_row, NSA_DISPUTE_COL),
             "num_comps": num_comps,
-            "procedure_type": _cell(proc_type_col),
+            "procedure_type": _cell_str(raw_row, NSA_PROC_TYPE_COL),
         })
 
     return records

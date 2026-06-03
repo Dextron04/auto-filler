@@ -200,7 +200,7 @@ function App() {
         : mode === 'ps'
           ? 'Uses the "Field to Fill" sheet. Routes each record to the correct template based on "Number of Comps in Position Statement" and "Procedure Type" rows.'
           : mode === 'ps_nsa'
-            ? 'NSA: tabular "Fields to Enter" sheet — placeholders in row 1, headers in row 2, one record per row. Routes by "Comps" + "Procedure Type" columns.'
+            ? 'NSA: tabular "Fields to Enter" sheet — placeholder labels row 1, one record per data row, fixed column layout. Routes by Comps (col I) + Procedure Type (col H, B&S/Pain).'
             : 'Uses the "Fields to Replace" sheet (column-oriented). Each record auto-routes to SCS or Default template based on the [Procedure] row.';
 
   const submitLabel = isProcessing

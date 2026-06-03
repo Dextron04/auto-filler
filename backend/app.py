@@ -585,12 +585,15 @@ def bulk_upm_process():
                     case_type = record.get('case_type', '')
                     if 'NSA' in case_type:
                         tmpl_bytes = nsa_bytes
+                        folder = 'NSA'
                         counts['NSA'] += 1
                     elif 'TDI' in case_type:
                         tmpl_bytes = tdi_bytes
+                        folder = 'TDI'
                         counts['TDI'] += 1
                     else:
-                        tmpl_bytes = tdi_bytes   # fallback
+                        tmpl_bytes = tdi_bytes
+                        folder = 'TDI'
                         counts['unknown'] += 1
 
                     doc, _ = fill_document(BytesIO(tmpl_bytes), record['mappings'])
@@ -604,10 +607,10 @@ def bulk_upm_process():
                         parts.append(f"row{idx:03d}")
 
                     base = "_".join(parts)
-                    name = f"{base}.docx"
+                    name = f"{folder}/{base}.docx"
                     n = 2
                     while name in used_names:
-                        name = f"{base}_{n}.docx"
+                        name = f"{folder}/{base}_{n}.docx"
                         n += 1
                     used_names.add(name)
 
